@@ -2,14 +2,6 @@ import numpy as np
 import pandas as pd
 from Distant_SigMA.SigMA.SigMA import SigMA
 
-
-#class ts =  treeSigMA(d,alpha threshold)
-#ts.next() gets labels of highest alpha
-#each time you call 
-#e alpha = 0 
-#alphath = (...)
-#remove noise function
-
 class TreeSigMA: 
     """Class applying the initial partitioning with SigMA
         data: pandas data frame
@@ -40,7 +32,7 @@ class TreeSigMA:
         
         self.data = data
         self.cluster_features = cluster_features
-        self.alpha_threshold = alpha_threshold #sorted(alpha_thresholds, reverse=True)
+        self.alpha_threshold = alpha_threshold 
         self.knn = knn
         self.sigma_kwargs = sigma_kwargs or {}
         self.current_alpha_idx = 0
@@ -58,7 +50,7 @@ class TreeSigMA:
         
         # Store tree levels
         self.tree = {}
-        self.node_indices = {}  # store indices of data points in each cluster
+        self.node_indices = {} # keys are cluster labels, values are lists of indices corresponding to the data points in that cluster at given alpha level.        
     
     def run(self):    
 
@@ -78,18 +70,20 @@ class TreeSigMA:
         #make a list of alpha values that are the centers between all these pvalues
         alpha_values = [(lower_pvalues[i] + lower_pvalues[i+1]) / 2 for i in range(len(lower_pvalues) - 1)]
 
-        # dictionary to store results of merge_clusters for each alpha
-        merged_results = {}
-
         # Run merge clustering for each alpha and store results
         for alpha in alpha_values:
             merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=20, alpha=alpha)
-            merged_results[alpha] = {
-                "labels": merged_labels,
-                "pvalues": merged_pvalues
-            }
 
             self.tree[alpha] = merged_labels
+            
+            # Store the node indices for each cluster label
+            node_indices = {}
+            for idx, label in enumerate(merged_labels):
+                if label not in node_indices:
+                    node_indices[label] = []
+                node_indices[label].append(idx)     
+            self.node_indices[alpha] = node_indices
+            
         self.alpha_values = alpha_values
         return alpha_values
        
@@ -107,7 +101,7 @@ class TreeSigMA:
 
         alpha = self.alpha_values[self.current_alpha_idx]
         self.current_alpha_idx += 1
-        return alpha, self.tree[alpha]
+        return alpha, self.tree[alpha], self.node_indices[alpha]
     
     def __iter__(self):
         """
@@ -121,9 +115,3 @@ class TreeSigMA:
         Advance the iterator.
         """
         return self.next()
-            
-    
-       
-
-
-    
