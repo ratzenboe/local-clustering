@@ -273,71 +273,64 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                     parent_id=parent_id,
                     data={"original_label": label, "indices": indices, "alpha": alpha}
                 )
-                
+
     def find_parent(self, label, current_alpha, unique_id_map, current_indices):
-            """
-            Find the parent node's unique ID based on the label's history and Jaccard similarity.
+        """
+        Find the parent node's unique ID based on Jaccard distance.
+    
+        Args:
+            label (int): The label of the current node.
+            current_alpha (float): The alpha value of the current node.
+            unique_id_map (dict): The mapping of labels to their unique ID history.
+            current_indices (list): Indices of the current node.
+    
+        Returns:
+            str or None: The unique ID of the parent node, or None if the node should not be added.
+        """
+        # Gather all potential parents with smaller alpha
+        potential_parents = []
+        min_alpha_diff = float("inf")  # Track the minimum alpha difference
         
-            Args:
-                label (int): The label of the current node.
-                current_alpha (float): The alpha value of the current node.
-                unique_id_map (dict): The mapping of labels to their unique ID history.
-                current_indices (list): Indices of the current node.
+        for other_label, history in unique_id_map.items():
+            for alpha, uid in history:
+                if alpha < current_alpha:  # Only consider nodes with smaller alpha
+                    alpha_diff = current_alpha - alpha
+                    if alpha_diff < min_alpha_diff:
+                        # Reset the list for a new minimum alpha difference
+                        min_alpha_diff = alpha_diff
+                        potential_parents = [(uid, self.hierarchy.nodes[uid].data["indices"])] 
+                    elif alpha_diff == min_alpha_diff:
+                        # Add to the list if alpha_diff matches the minimum
+                        potential_parents.append((uid, self.hierarchy.nodes[uid].data["indices"]))
         
-            Returns:
-                str: The unique ID of the parent node.
-            """
+        # If no potential parents are found
+        if not potential_parents:
+            return None
         
-            # Filter unique IDs for this label where alpha is less than current_alpha
-            parent_candidates = [
-                (alpha, uid) for alpha, uid in unique_id_map[label] if alpha < current_alpha
-            ]
+        # Compute Jaccard distances for all potential parents
+        parent_ids, parent_indices = zip(*potential_parents)
+        jacc_matrix = self.compute_jaccard_matrix([current_indices], parent_indices)
+        print(jacc_matrix)
         
-            if parent_candidates:
-                # Return the most recent parent
-                return parent_candidates[-1][1]
-        
-            # Use Jaccard similarity
-            best_parent = None
-            best_similarity = -1  # Initialize with a negative value
-        
-            # Prepare all existing nodes' indices as potential parents
-            existing_labels = []
-            existing_indices = []
-            
-            max_alpha = -float('inf')  # Variable to store the latest alpha value
-            possible_parents = []  # List to store nodes that might be parents
-            
-            # Loop over the unique_id_map to filter out the nodes with the latest alpha values
-            for other_label, history in unique_id_map.items():
-                for alpha, uid in history:
-                    if alpha < current_alpha:
-                        other_indices = self.hierarchy.nodes[uid].data["indices"]
-                        existing_labels.append(uid)
-                        existing_indices.append(other_indices)
-                        
-                        # Track maximum alpha value and nodes
-                        if alpha > max_alpha:
-                            max_alpha = alpha
-                            possible_parents = [uid]  # Reset possible parents if a new max alpha is found
-                        elif alpha == max_alpha:
-                            possible_parents.append(uid)  # Add to possible parents if it matches the max alpha
-            
-            # Now we have the nodes with the latest alpha value in `possible_parents`
-            # Compute Jaccard matrix only for these nodes
-            if possible_parents:
-                filtered_indices = [self.hierarchy.nodes[uid].data["indices"] for uid in possible_parents]
-                jacc_matrix = self.compute_jaccard_matrix([current_indices], filtered_indices)
-                print(jacc_matrix)
-                
-                max_sim_index = np.unravel_index(np.argmax(jacc_matrix), jacc_matrix.shape)
-                best_similarity = jacc_matrix[max_sim_index]
-                best_parent = possible_parents[max_sim_index[1]]
-        
-            if best_parent is None:  # Threshold for similarity
-                raise ValueError(f"No valid parent found for label {label} at alpha {current_alpha}!")
-        
-            return best_parent
+        # Find the best Jaccard match
+        max_similarity = np.max(jacc_matrix)
+        if max_similarity == 1:
+            # If JD is 1 for any parent, the node is not added to the tree but the alpha level list is updated 
+            best_parent_idx = np.argmax(jacc_matrix)
+            best_parent_id = parent_ids[best_parent_idx]
+            #hier muss das alpha level list geupdated werden
+            return best_parent_id
+        elif 0 < max_similarity < 1:
+            # If JD is between 0 and 1, select the corresponding parent
+            best_parent_idx = np.argmax(jacc_matrix)
+            best_parent_id = parent_ids[best_parent_idx]
+            print(f"Node with label {label} and alpha {current_alpha} has JD={max_similarity}; assigning parent {best_parent_id}.")
+            return best_parent_id
+        else:
+            # If no valid JD found, return None (node will not be added)
+            print(f"Node with label {label} and alpha {current_alpha} has JD=0 or no valid match; it will not be added to the tree.")
+            return None
+
 
     def compute_jaccard_matrix(self, labels_1, labels_2):
             """
@@ -364,4 +357,3 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                         jacc_matrix[i, j] = intersection_size / union_size
         
             return jacc_matrix
-
