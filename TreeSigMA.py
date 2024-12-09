@@ -315,10 +315,6 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             if previous_alpha_idx in node.alpha_levels
         ]
         
-        print(f"Alpha Levels for Parent Candidates at Alpha {current_alpha}:")
-        for uid in self.hierarchy.nodes:
-            print(f"Node {uid}: {self.hierarchy.nodes[uid].alpha_levels}")
-
         # If no parent candidates, no parents 
         if not parent_candidates:
             return None, None
