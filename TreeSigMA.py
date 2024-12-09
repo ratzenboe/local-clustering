@@ -121,7 +121,7 @@ class TreeSigMA:
 
 class TreeNode:
     """A single node in the hierarchy tree."""
-    def __init__(self, node_id, parent=None, children=None, data=None):
+    def __init__(self, node_id, parent=None, children=None, data=None, alpha_levels=None):
         """
         Initialize a tree node.
         
@@ -135,6 +135,7 @@ class TreeNode:
         self.parent = parent
         self.children = children or []
         self.data = data or {}
+        self.alpha_levels = alpha_levels or []
 
     def add_child(self, child_node):
         """Add a child node to this node."""
@@ -144,6 +145,10 @@ class TreeNode:
     def is_leaf(self):
         """Check if the node is a leaf."""
         return len(self.children) == 0
+
+    def update_alpha_levels(self, new_alpha):
+            """Update the alpha levels for this node."""
+            self.alpha_levels.append(new_alpha)
 
 
 class TreeStructure:
@@ -240,41 +245,54 @@ class TreeSigMAWithHierarchy(TreeSigMA):
     
         unique_id_map = {}  # Map to store unique IDs for each label
     
-        for alpha in self.alpha_values:
+        for alpha_idx, alpha in enumerate(self.alpha_values):
             labels = self.tree[alpha]
             node_indices = self.node_indices[alpha]
-    
+
             for label, indices in node_indices.items():
                 # Generate a unique ID for the node
                 unique_id = f"{label}_{alpha}"
-                if unique_id in unique_id_map:
-                    raise ValueError(f"Duplicate unique ID {unique_id} generated!")
-
-                 # Initialize or append to the unique ID map
-                if label not in unique_id_map:
-                    unique_id_map[label] = []
-                unique_id_map[label].append((alpha, unique_id))
-
-                # Determine the parent
-                if alpha == self.alpha_values[0]:
-                    parent_id = virtual_root_id  # Attach initial roots to the virtual root
+                
+                # Determine the parent based on JD and alpha levels
+                if alpha_idx == 0:
+                    parent_id = virtual_root_id
+                    jd_value = None
                 else:
                     # Call `find_parent` with current node details
-                    parent_id = self.find_parent(label, alpha, unique_id_map, indices)
-
-                if parent_id is None:
-                    raise ValueError(f"Parent node for {unique_id} not found!")
-    
-                print(f"Adding node {unique_id} (original label {label}) with parent {parent_id}, alpha {alpha}")
-    
-                # Add the node to the hierarchy
+                    parent_id, jd_value = self.find_parent(
+                        label=label,
+                        current_alpha=alpha,
+                        unique_id_map=unique_id_map,
+                        current_indices=indices,
+                        current_alpha_idx=alpha_idx
+                    )
+                    
+                # If a parent was found and JD=1, only update the alpha_level list
+                if jd_value == 1:
+                    parent_node = self.hierarchy.nodes[parent_id]
+                    parent_node.update_alpha_levels(alpha_idx)
+                    continue
+                
+                # create new node and add to tree
                 self.hierarchy.add_node(
                     node_id=unique_id,
                     parent_id=parent_id,
                     data={"original_label": label, "indices": indices, "alpha": alpha}
                 )
+                
+                # Initialize or append to the unique ID map
+                if label not in unique_id_map:
+                    unique_id_map[label] = []
+                unique_id_map[label].append((alpha, unique_id))
+                
+                # Initialize alpha levels for the new node
+                self.hierarchy.nodes[unique_id].update_alpha_levels(alpha_idx)
 
-    def find_parent(self, label, current_alpha, unique_id_map, current_indices):
+                print(f"Adding node {unique_id} (original label {label}) with parent {parent_id}, alpha {alpha}")
+    
+    
+
+    def find_parent(self, label, current_alpha, unique_id_map, current_indices, current_alpha_idx):
         """
         Find the parent node's unique ID based on Jaccard distance.
     
@@ -283,53 +301,47 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             current_alpha (float): The alpha value of the current node.
             unique_id_map (dict): The mapping of labels to their unique ID history.
             current_indices (list): Indices of the current node.
+            current_alpha_idx (int): current Alpha-Index.
     
         Returns:
             str or None: The unique ID of the parent node, or None if the node should not be added.
         """
-        # Gather all potential parents with smaller alpha
-        potential_parents = []
-        min_alpha_diff = float("inf")  # Track the minimum alpha difference
+
+        # parent cadidates from previous alpha level 
+        previous_alpha_idx = current_alpha_idx - 1
+        parent_candidates = [
+            (node_id, node.data["indices"])
+            for node_id, node in self.hierarchy.nodes.items()
+            if previous_alpha_idx in node.alpha_levels
+        ]
         
-        for other_label, history in unique_id_map.items():
-            for alpha, uid in history:
-                if alpha < current_alpha:  # Only consider nodes with smaller alpha
-                    alpha_diff = current_alpha - alpha
-                    if alpha_diff < min_alpha_diff:
-                        # Reset the list for a new minimum alpha difference
-                        min_alpha_diff = alpha_diff
-                        potential_parents = [(uid, self.hierarchy.nodes[uid].data["indices"])] 
-                    elif alpha_diff == min_alpha_diff:
-                        # Add to the list if alpha_diff matches the minimum
-                        potential_parents.append((uid, self.hierarchy.nodes[uid].data["indices"]))
+        print(f"Alpha Levels for Parent Candidates at Alpha {current_alpha}:")
+        for uid in self.hierarchy.nodes:
+            print(f"Node {uid}: {self.hierarchy.nodes[uid].alpha_levels}")
+
+        # If no parent candidates, no parents 
+        if not parent_candidates:
+            return None, None
         
-        # If no potential parents are found
-        if not potential_parents:
-            return None
-        
-        # Compute Jaccard distances for all potential parents
-        parent_ids, parent_indices = zip(*potential_parents)
+        # Compute JD-Matrix for all potential parents
+        parent_ids, parent_indices = zip(*parent_candidates)
         jacc_matrix = self.compute_jaccard_matrix([current_indices], parent_indices)
         print(jacc_matrix)
-        
-        # Find the best Jaccard match
+
+        # find best JD-Match 
         max_similarity = np.max(jacc_matrix)
+        best_parent_idx = np.argmax(jacc_matrix)
+        best_parent_id = parent_ids[best_parent_idx]
+        
         if max_similarity == 1:
-            # If JD is 1 for any parent, the node is not added to the tree but the alpha level list is updated 
-            best_parent_idx = np.argmax(jacc_matrix)
-            best_parent_id = parent_ids[best_parent_idx]
-            #hier muss das alpha level list geupdated werden
-            return best_parent_id
+            # update alpha_levels of parental node
+            return best_parent_id, 1
         elif 0 < max_similarity < 1:
-            # If JD is between 0 and 1, select the corresponding parent
-            best_parent_idx = np.argmax(jacc_matrix)
-            best_parent_id = parent_ids[best_parent_idx]
-            print(f"Node with label {label} and alpha {current_alpha} has JD={max_similarity}; assigning parent {best_parent_id}.")
-            return best_parent_id
+            # add the node of the children
+            return best_parent_id, max_similarity
         else:
-            # If no valid JD found, return None (node will not be added)
-            print(f"Node with label {label} and alpha {current_alpha} has JD=0 or no valid match; it will not be added to the tree.")
-            return None
+            # no parent node
+            return None, None
 
 
     def compute_jaccard_matrix(self, labels_1, labels_2):
@@ -357,3 +369,5 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                         jacc_matrix[i, j] = intersection_size / union_size
         
             return jacc_matrix
+
+
