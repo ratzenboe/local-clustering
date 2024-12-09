@@ -224,6 +224,22 @@ class TreeStructure:
             yield from self.traverse_bottom_up(child)
         yield start_node
 
+    def labels(self, a_step):
+            """
+            Retrieve all labels containing the specified alpha level in their alpha_values list.
+            
+            Args:
+                a_step (int): The alpha level to search for.
+            
+            Returns:
+                list: A list of node IDs that have the specified alpha level.
+            """
+            matching_labels = []
+            for node in self.traverse_top_down():
+                if a_step in node.alpha_levels:
+                    matching_labels.append(node.node_id)
+            return matching_labels
+
 
 # Integration with TreeSigMA
 class TreeSigMAWithHierarchy(TreeSigMA):
@@ -323,6 +339,13 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         parent_ids, parent_indices = zip(*parent_candidates)
         jacc_matrix = self.compute_jaccard_matrix([current_indices], parent_indices)
         print(jacc_matrix)
+
+        # Check for race condition: more than one non-zero entry in the Jaccard matrix should not occur
+        non_zero_count = np.count_nonzero(jacc_matrix)
+        if non_zero_count > 1:
+            raise RaceError(
+                f"Race condition detected: {non_zero_count} non-zero entries in Jaccard matrix for label {label} at alpha {current_alpha}."
+            )
 
         # find best JD-Match 
         max_similarity = np.max(jacc_matrix)
