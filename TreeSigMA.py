@@ -247,6 +247,7 @@ class TreeSigMAWithHierarchy(TreeSigMA):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.hierarchy = TreeStructure()
+        self.survivability = {}  # Dictionary to store survivability info
 
     def build_hierarchy(self):
         """
@@ -388,5 +389,31 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                         jacc_matrix[i, j] = intersection_size / union_size
         
             return jacc_matrix
+
+    def compute_survivability(self):
+        """
+        Compute survivability for each cluster.
+        Survivability is defined as the number of alpha levels a cluster persists.
+        """
+        for node_id, node in self.hierarchy.nodes.items():
+            if node.parent:  # Exclude root node
+                first_alpha = min(node.alpha_levels)
+                last_alpha = max(node.alpha_levels)
+                survivability = last_alpha - first_alpha + 1
+                self.survivability[node_id] = survivability
+
+    def get_survivability(self, cluster_id=None):
+        """
+        Get survivability information.
+        
+        Args:
+            cluster_id: Cluster ID to query. If None, returns info for all clusters.
+        
+        Returns:
+            Survivability info for the specified cluster or all clusters.
+        """
+        if cluster_id:
+            return self.survivability.get(cluster_id, "Cluster not found")
+        return self.survivability
 
 
