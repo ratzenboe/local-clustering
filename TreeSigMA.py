@@ -4,6 +4,8 @@ from Distant_SigMA.SigMA.SigMA import SigMA
 from sklearn.metrics.cluster import contingency_matrix
 from itertools import product
 from sklearn.metrics.cluster import contingency_matrix
+from scipy.spatial import KDTree
+from sklearn.mixture import GaussianMixture
 
 class TreeSigMA: 
     """Class applying the initial partitioning with SigMA
@@ -121,7 +123,7 @@ class TreeSigMA:
 
 class TreeNode:
     """A single node in the hierarchy tree."""
-    def __init__(self, node_id, parent=None, children=None, data=None, alpha_levels=None):
+    def __init__(self, node_id, parent=None, children=None, data_indices=None, alpha_levels=None, original_label = None):
         """
         Initialize a tree node.
         
@@ -129,13 +131,16 @@ class TreeNode:
             node_id (int): Unique identifier for the node.
             parent (TreeNode, optional): The parent node. Defaults to None.
             children (list[TreeNode], optional): List of child nodes. Defaults to None.
-            data (dict, optional): Data associated with this node (e.g., indices). Defaults to None.
+            data_indices (np array, optional): Stars indices associated with this node. Defaults to None.
+            original_label (int): SigMA label associated with the node. Defaults to None.
         """
         self.node_id = node_id
         self.parent = parent
         self.children = children or []
-        self.data = data or {}
+        self.data_indices = np.array(data_indices) if data_indices is not None else np.array([])
         self.alpha_levels = alpha_levels or []
+        self.original_label = original_label
+        self.sig_bg_array = None  
 
     def add_child(self, child_node):
         """Add a child node to this node."""
@@ -158,20 +163,21 @@ class TreeStructure:
         self.nodes = {}  # Dictionary of node_id -> TreeNode
         self.root = None
 
-    def add_node(self, node_id, parent_id=None, data=None):
+    def add_node(self, node_id, parent_id=None, data_indices=None, original_label = None):
         """
         Add a node to the tree.
         
         Args:
             node_id (int): Unique identifier for the node.
             parent_id (int, optional): Identifier of the parent node. Defaults to None (root node).
-            data (dict, optional): Data associated with the node.
+            data_indices (np array, optional): Star indices associated with the node.
+            original_label (int): SigMA label associated with the node.
         """
         if node_id in self.nodes:
             raise ValueError(f"Node with id {node_id} already exists!")
 
         # Create the new node
-        new_node = TreeNode(node_id=node_id, data=data)
+        new_node = TreeNode(node_id=node_id, data_indices=data_indices, original_label=original_label)
 
         if parent_id is None:
             # This is the root node
@@ -224,22 +230,6 @@ class TreeStructure:
             yield from self.traverse_bottom_up(child)
         yield start_node
 
-    def labels(self, a_step):
-            """
-            Retrieve all labels containing the specified alpha level in their alpha_values list.
-            
-            Args:
-                a_step (int): The alpha level to search for.
-            
-            Returns:
-                list: A list of node IDs that have the specified alpha level.
-            """
-            matching_labels = []
-            for node in self.traverse_top_down():
-                if a_step in node.alpha_levels:
-                    matching_labels.append(node.node_id)
-            return matching_labels
-
 
 # Integration with TreeSigMA
 class TreeSigMAWithHierarchy(TreeSigMA):
@@ -257,7 +247,8 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         self.hierarchy.add_node(
             node_id=virtual_root_id,
             parent_id=None,
-            data={"info": "This is the virtual root"}
+            data_indices=None,
+            original_label=None
         )
     
         unique_id_map = {}  # Map to store unique IDs for each label
@@ -279,7 +270,6 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                     parent_id, jd_value = self.find_parent(
                         label=label,
                         current_alpha=alpha,
-                        unique_id_map=unique_id_map,
                         current_indices=indices,
                         current_alpha_idx=alpha_idx
                     )
@@ -294,30 +284,30 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                 self.hierarchy.add_node(
                     node_id=unique_id,
                     parent_id=parent_id,
-                    data={"original_label": label, "indices": indices, "alpha": alpha}
+                    data_indices=indices,
+                    original_label=label
                 )
                 
                 # Initialize or append to the unique ID map
                 if label not in unique_id_map:
                     unique_id_map[label] = []
                 unique_id_map[label].append((alpha, unique_id))
+                print('uniq', unique_id_map[label])
                 
                 # Initialize alpha levels for the new node
                 self.hierarchy.nodes[unique_id].update_alpha_levels(alpha_idx)
 
                 print(f"Adding node {unique_id} (original label {label}) with parent {parent_id}, alpha {alpha}")
     
-    
 
-    def find_parent(self, label, current_alpha, unique_id_map, current_indices, current_alpha_idx):
+    def find_parent(self, label, current_alpha, current_indices, current_alpha_idx):
         """
         Find the parent node's unique ID based on Jaccard distance.
     
         Args:
             label (int): The label of the current node.
             current_alpha (float): The alpha value of the current node.
-            unique_id_map (dict): The mapping of labels to their unique ID history.
-            current_indices (list): Indices of the current node.
+            current_indices (list): Star indices of the current node.
             current_alpha_idx (int): current Alpha-Index.
     
         Returns:
@@ -327,7 +317,7 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         # parent cadidates from previous alpha level 
         previous_alpha_idx = current_alpha_idx - 1
         parent_candidates = [
-            (node_id, node.data["indices"])
+            (node_id, node.data_indices)
             for node_id, node in self.hierarchy.nodes.items()
             if previous_alpha_idx in node.alpha_levels
         ]
@@ -338,14 +328,14 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         
         # Compute JD-Matrix for all potential parents
         parent_ids, parent_indices = zip(*parent_candidates)
+
         jacc_matrix = self.compute_jaccard_matrix([current_indices], parent_indices)
-        print(jacc_matrix)
 
         # Check for race condition: more than one non-zero entry in the Jaccard matrix should not occur
         non_zero_count = np.count_nonzero(jacc_matrix)
         if non_zero_count > 1:
-            raise RaceError(
-                f"Race condition detected: {non_zero_count} non-zero entries in Jaccard matrix for label {label} at alpha {current_alpha}."
+            raise ValueError(
+                f"Value Error: {non_zero_count} non-zero entries in Jaccard matrix for label {label} at alpha {current_alpha}."
             )
 
         # find best JD-Match 
@@ -390,6 +380,25 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         
             return jacc_matrix
 
+    def labels(self, a_step):
+        """
+        Retrieve all labels containing the specified alpha level in their alpha_values list.
+        
+        Args:
+            a_step (int): The alpha level to search for.
+        
+        Returns:
+            array: An np array of node IDs for stars at the specified alpha level.
+        """
+        N = len(self.data)  # Total number of stars
+        l = -np.ones(N, dtype=int)  # Initialize the label array with -1
+
+        for node in self.hierarchy.traverse_top_down():
+            if a_step in node.alpha_levels:
+                indices = node.data_indices # Stellar indices
+                l[indices] = node.original_label # Assign the unique ID to the corresponding indices
+        return l
+
     def compute_survivability(self):
         """
         Compute survivability for each cluster.
@@ -416,4 +425,66 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             return self.survivability.get(cluster_id, "Cluster not found")
         return self.survivability
 
-
+    def average_signal_bg_ratio(self, X, max_neighbors, k_neighbors):
+        """
+        Compute average signal-to-background ratio for all stars in the hierarchy.
+    
+        Args:
+            X (ndarray): Feature matrix of the data (e.g., positions of stars).
+            max_neighbors (int): Maximum number of neighbors for kNN density estimation.
+            k_neighbors (int): Number of nearest neighbors for kNN density calculation.
+    
+        Returns:
+            knn_density_data (dict): Dictionary with node IDs as keys and kNN densities as values.
+            avg_signal_bg_ratio (ndarray): Array of average signal-to-background ratios for all stars.
+        """
+        kd_tree = KDTree(X)
+        
+        # Dictionary to save kNN density for each node
+        knn_density_data = {}
+    
+        # Number of stars
+        N = len(X)
+        
+        # Matrix to store signal-to-background labels for all stars across nodes
+        sig_bg_mtx = np.full((N, len(self.hierarchy.nodes)), fill_value=np.nan)
+        
+        # Iterate through each node in the hierarchy
+        for node_idx, node in enumerate(self.hierarchy.traverse_top_down()):
+            if node.parent is None:  # Skip the root node
+                continue
+    
+            # Retrieve data indices for the current node
+            data_indices = node.data_indices
+    
+            # Query distances for points in the node's cluster
+            k_dists, _ = kd_tree.query(X[data_indices], k=max_neighbors + 1, workers=-1)
+            k_dists = np.sort(k_dists[:, 1:], axis=1)  # Exclude self-distance (0) and sort
+    
+            # Calculate kNN density
+            knn_density = 1 / np.sqrt(np.mean(np.square(k_dists[:, :k_neighbors - 1]), axis=1))
+            
+            # Save the kNN density data for the node
+            knn_density_data[node.node_id] = knn_density
+    
+            # Fit Gaussian Mixture Model to separate signal and background
+            gm = GaussianMixture(n_components=2, random_state=42)
+            gm.fit(knn_density.reshape(-1, 1))
+    
+            # Extract means and define signal threshold
+            means = gm.means_.flatten()
+            threshold = np.sort(means)[1]  # Signal threshold
+    
+            # Assign signal/background labels
+            signal_bg_labels = (knn_density > threshold).astype(int)  # 0: background, 1: signal
+    
+            # Store signal/background labels in the matrix
+            sig_bg_mtx[data_indices, node_idx] = signal_bg_labels
+            node.sig_bg_array = signal_bg_labels  # Save the signal/background array in the node
+    
+        # Compute the average signal-to-background ratio for each star
+        avg_signal_bg_ratio = np.nanmean(sig_bg_mtx, axis=1)  # Average across nodes
+    
+        return knn_density_data, avg_signal_bg_ratio, sig_bg_mtx
+    
+    
