@@ -244,12 +244,13 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         Build the hierarchical tree structure from the clustering results.
         """
         virtual_root_id = "virtual_root"
-        self.hierarchy.add_node(
-            node_id=virtual_root_id,
-            parent_id=None,
-            data_indices=None,
-            original_label=None
-        )
+        if virtual_root_id not in self.hierarchy.nodes:
+            self.hierarchy.add_node(
+                node_id=virtual_root_id,
+                parent_id=None,
+                data_indices=None,
+                original_label=None
+            )
     
         unique_id_map = {}  # Map to store unique IDs for each label
     
@@ -292,7 +293,6 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                 if label not in unique_id_map:
                     unique_id_map[label] = []
                 unique_id_map[label].append((alpha, unique_id))
-                print('uniq', unique_id_map[label])
                 
                 # Initialize alpha levels for the new node
                 self.hierarchy.nodes[unique_id].update_alpha_levels(alpha_idx)
@@ -486,5 +486,42 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         avg_signal_bg_ratio = np.nanmean(sig_bg_mtx, axis=1)  # Average across nodes
     
         return knn_density_data, avg_signal_bg_ratio, sig_bg_mtx
-    
+
+    def prune_tree(self, star_threshold=50):
+        """
+        Prune the tree by removing nodes with fewer than the specified number of stars
+        if they and all their siblings have no children.
+
+        Args:
+            star_threshold (int): Minimum number of stars required to retain a node.
+
+        Returns:
+            TreeStructure: A pruned copy of the tree.
+        """
+        # Create a deep copy of the current tree to preserve the original
+        import copy
+        pruned_tree = copy.deepcopy(self)
+
+        # Traverse the tree from bottom to top
+        for node in pruned_tree.hierarchy.traverse_bottom_up():
+            # Skip the root node
+            if node.parent is None:
+                continue
+
+            # Check the number of stars in the current node
+            star_count = len(node.data_indices)
+
+            # Get the siblings of the current node
+            parent = node.parent
+            siblings = [child for child in parent.children if child != node]
+
+            # Check if all siblings have no children
+            siblings_have_no_children = all(sibling.is_leaf() for sibling in siblings)
+
+            # If the node and its siblings meet the removal conditions, prune them
+            if star_count < star_threshold and siblings_have_no_children:
+                # Remove this node and its siblings from the parent's children list
+                parent.children = [child for child in parent.children if child not in siblings + [node]]
+
+        return pruned_tree
     
