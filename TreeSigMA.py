@@ -6,6 +6,7 @@ from itertools import product
 from sklearn.metrics.cluster import contingency_matrix
 from scipy.spatial import KDTree
 from sklearn.mixture import GaussianMixture
+import copy
 
 class TreeSigMA: 
     """Class applying the initial partitioning with SigMA
@@ -76,7 +77,7 @@ class TreeSigMA:
         
         # Run merge clustering for each alpha and store results
         for alpha in alpha_values:
-            merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=20, alpha=alpha)
+            merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=self.knn, alpha=alpha)
 
             self.tree[alpha] = merged_labels
             
@@ -489,39 +490,100 @@ class TreeSigMAWithHierarchy(TreeSigMA):
 
     def prune_tree(self, star_threshold=50):
         """
-        Prune the tree by removing nodes with fewer than the specified number of stars
-        if they and all their siblings have no children.
-
-        Args:
-            star_threshold (int): Minimum number of stars required to retain a node.
-
-        Returns:
-            TreeStructure: A pruned copy of the tree.
-        """
-        # Create a deep copy of the current tree to preserve the original
-        import copy
+            Prune the tree by:
+            1. Removing nodes with fewer than the specified number of stars
+               if they and all their siblings have no children.
+            2. Removing node and its siblings if it has fewer than 2 alpha levels and 
+               if they and all their siblings have no children..
+        
+            If nodes are removed, their alpha levels are added to their parent's alpha levels.
+    
+            Args:
+                star_threshold (int): Minimum number of stars required to retain a node.
+    
+            Returns:
+                TreeStructure: A pruned copy of the tree.
+            """
+        # Create a deep copy of the original tree
         pruned_tree = copy.deepcopy(self)
 
+        # First pass: Remove nodes based on condition 1
+        self.remove_nodes_based_on_condition(pruned_tree, lambda node: self.condition1(node, star_threshold))
+    
+        # Second pass: Remove nodes based on condition 2
+        self.remove_nodes_based_on_condition(pruned_tree, self.condition2)
+    
+        return pruned_tree
+
+    def remove_nodes_based_on_condition(self, tree, condition_func):
+        """
+        Traverse the tree bottom-up and remove nodes based on a condition.
+    
+        Args:
+            tree (TreeStructure): The tree to modify.
+            condition_func (Callable): A function that returns True if a node should be removed.
+        """
+        removed_node_ids = set() # Track removed nodes to avoid redundant processing
+
         # Traverse the tree from bottom to top
-        for node in pruned_tree.hierarchy.traverse_bottom_up():
+        for node in tree.hierarchy.traverse_bottom_up():
             # Skip the root node
             if node.parent is None:
                 continue
-
-            # Check the number of stars in the current node
-            star_count = len(node.data_indices)
-
-            # Get the siblings of the current node
-            parent = node.parent
-            siblings = [child for child in parent.children if child != node]
-
-            # Check if all siblings have no children
-            siblings_have_no_children = all(sibling.is_leaf() for sibling in siblings)
-
-            # If the node and its siblings meet the removal conditions, prune them
-            if star_count < star_threshold and siblings_have_no_children:
-                # Remove this node and its siblings from the parent's children list
-                parent.children = [child for child in parent.children if child not in siblings + [node]]
-
-        return pruned_tree
     
+            # Skip nodes already removed
+            if node.node_id in removed_node_ids:
+                continue
+    
+            # Check if the node meets the condition for removal
+            if condition_func(node):
+                parent = node.parent
+                siblings = [child for child in parent.children if child != node] # Get the siblings of the current node
+                nodes_to_remove = siblings + [node]
+    
+                # Collect alpha levels of removed nodes
+                unique_alpha_levels = set()
+                for removed_node in nodes_to_remove:
+                    unique_alpha_levels.update(removed_node.alpha_levels)
+                    removed_node_ids.add(removed_node.node_id)
+    
+                # Update parent's alpha levels
+                parent.alpha_levels = sorted(set(parent.alpha_levels).union(unique_alpha_levels))
+    
+                # Remove nodes from parent's children list
+                parent.children = [child for child in parent.children if child not in nodes_to_remove]
+    
+                # Remove nodes from the hierarchy's dictionary
+                for removed_node in nodes_to_remove:
+                    tree.hierarchy.nodes.pop(removed_node.node_id, None)
+
+
+
+    def condition1(self, node, star_threshold):
+        """
+        Determine if a node should be removed based on condition 1:
+        The node and all its siblings have no children, and the node has fewer stars than the threshold.
+    
+        Args:
+            node (Node): The node to evaluate.
+            star_threshold (int): The minimum number of stars required to retain the node.
+    
+        Returns:
+            bool: True if the node should be removed, False otherwise.
+        """
+        siblings_have_no_children = all(sibling.is_leaf() for sibling in node.parent.children)
+        return node.is_leaf() and siblings_have_no_children and len(node.data_indices) < star_threshold
+    
+    def condition2(self, node):
+        """
+        Determine if a node should be removed based on condition 2:
+        The node and all its siblings have no children, and the node has fewer than 2 alpha levels.
+    
+        Args:
+            node (Node): The node to evaluate.
+    
+        Returns:
+            bool: True if the node should be removed, False otherwise.
+        """
+        siblings_have_no_children = all(sibling.is_leaf() for sibling in node.parent.children)
+        return node.is_leaf() and siblings_have_no_children and len(node.alpha_levels) < 2
