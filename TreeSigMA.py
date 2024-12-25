@@ -230,6 +230,21 @@ class TreeStructure:
         for child in start_node.children:
             yield from self.traverse_bottom_up(child)
         yield start_node
+    
+    def get_all_indices(self):   
+        """
+        Collect all data indices from each node in the tree.
+
+        Returns:
+            list: A list of numpy arrays, where each array contains the indices
+                  associated with a node.
+        """
+        all_indices = []
+        for node in self.traverse_top_down():
+            if node.data_indices is not None and len(node.data_indices) > 0:
+                all_indices.append(node.data_indices)
+
+        return all_indices
 
 
 # Integration with TreeSigMA
