@@ -7,7 +7,7 @@ from sklearn.metrics.cluster import contingency_matrix
 from scipy.spatial import KDTree
 from sklearn.mixture import GaussianMixture
 import copy
-from scipy.stats import ks_2samp, skewtest
+from scipy.stats import ks_2samp, skewtest, skew
 
 class TreeSigMA: 
     """Class applying the initial partitioning with SigMA
@@ -504,7 +504,7 @@ class TreeSigMAWithHierarchy(TreeSigMA):
     
         return knn_density_data, avg_signal_bg_ratio, sig_bg_mtx
 
-    def prune_tree(self, star_threshold, X, ks_p_threshold=0.05, skew_p_threshold=0.05):
+    def prune_tree(self, star_threshold, X, ks_p_threshold=0.05, skew_p_threshold=0.05, min_skew = 0.8):
         """
             Prune the tree by:
             1. Removing nodes with fewer than the specified number of stars
@@ -531,15 +531,15 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             removed_nodes = False
 
             # First pass: Remove nodes based on condition 1
-            #if self.remove_nodes_based_on_condition(pruned_tree, lambda node: self.condition1(node, star_threshold)):
-             #   removed_nodes = True
+            if self.remove_nodes_based_on_condition(pruned_tree, lambda node: self.condition1(node, star_threshold)):
+                removed_nodes = True
     
             # Second pass: Remove nodes based on condition 2
           #  if self.remove_nodes_based_on_condition(pruned_tree, lambda node: self.condition2(node)):
            #     removed_nodes = True
 
-            # Thirs pass: Remove nodes based on condition 3
-            if self.remove_nodes_based_on_condition(pruned_tree, lambda node: self.condition3(node, X, ks_p_threshold, skew_p_threshold)):
+            # Third pass: Remove nodes based on condition 3
+            if self.remove_nodes_based_on_condition(pruned_tree, lambda node: self.condition3(node, X, ks_p_threshold, skew_p_threshold, min_skew)):
                 removed_nodes = True
     
         return pruned_tree
@@ -621,11 +621,14 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         siblings_have_no_children = all(sibling.is_leaf() for sibling in node.parent.children)
         return node.is_leaf() and siblings_have_no_children and len(node.alpha_levels) < 2
 
-    def condition3(self, node, X, ks_p_threshold, skew_p_threshold):
+    def condition3(self, node, X, ks_p_threshold, skew_p_threshold, min_skew):
         """
         Determine if a node should be removed based on condition 3:
         The node and all its siblings have no children, and the likelihood that there is a cluster in the cell is small based on KS test and
-        skewnesstest.
+        skewness test.
+
+        Skewness test: H: there is no skewness to 1 side for a node - merge if H can not be rejected 
+        KS-test: H: the density distribution of two nodes s similar - merge if H can not be rejected 
     
         Args:
             node (Node): The node to evaluate.        
@@ -652,28 +655,29 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             sibling_densities = self.get_densities(node, X, sibling.data_indices)
             node_densities = self.get_densities(node, X, node.data_indices)
 
-            # Skip skewtest for nodes with fewer than 8 members
-            if len(sibling_densities) < 8 or len(node_densities) < 8:
-                # Perform only KS-test in this case
-                ks_stat, ks_p_value = ks_2samp(parent_densities, sibling_densities)
-                if ks_p_value > ks_p_threshold:
-                    return True  # Merge based on KS-test alone
-                continue
-        
-            # 1. KS-test between parent and sibling
-            # H: Their density distribution is similar - merge if H can not be rejected 
-            ks_stat, ks_p_value = ks_2samp(parent_densities, sibling_densities)
-            ks_merge = ks_p_value > ks_p_threshold # if p-value larger threshold, they are similar 
-    
-            # 2. Skewness test for sibling and current node
-            # H: there is no skewness to 1 side for the other child - merge if H can not be rejected 
+            # Skewness test for node and sibling
             _, node_skew_p_value = skewtest(node_densities, alternative="greater")
-            skew_merge = node_skew_p_value > skew_p_threshold#if p-value is large no skewness to 1 side
+            _, sibling_skew_p_value = skewtest(sibling_densities, alternative="greater")
+            node_is_skewed = node_skew_p_value < skew_p_threshold and skew(node_densities) > min_skew #if p-value is small - skewness to 1 side
+            sibling_is_skewed = sibling_skew_p_value < skew_p_threshold and skew(sibling_densities) > min_skew
+
+            # 1. Merge condition: Skewness test for current node. If skewed, test if KS-test of parent and current node fails.           
+            one_node_is_noise = False
+            if node_is_skewed: 
+                # KS-test between parent and node
+                ks_stat, ks_p_value = ks_2samp(parent_densities, node_densities)
+                ks_test_failed = ks_p_value < ks_p_threshold # if p-value smaller threshold, they are not similar.
+                one_node_is_much_noise = ks_test_failed and not sibling_is_skewed # & skewness test fails -> merge 
+                one_node_is_few_noise = not ks_test_failed # node is similar to parent 
+                one_node_is_noise = one_node_is_much_noise or one_node_is_few_noise
+                    
+            # 2. Merge condition: node and sibling pass the skewness test - they have no skewness 
+            both_nodes_not_skewed = not node_is_skewed and not sibling_is_skewed
     
             # Merge condition: Both tests indicate no cluster
-            if ks_merge or skew_merge:
+            if one_node_is_noise or both_nodes_not_skewed:
                 return True  # The node should be merged back
-    
+                
         return False
 
     def get_densities(self, node, X, data_indices):
