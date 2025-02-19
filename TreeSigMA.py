@@ -57,8 +57,9 @@ class TreeSigMA:
         
         self.tree = {} # Stores tree levels
         self.node_indices = {} # keys are cluster labels, values are lists of indices corresponding to the data points in that cluster at given alpha level.        
+        self.alpha_values = None  # numpy array alpha values used to build the hierarchy
     
-    def run(self):    
+    def run(self, n_steps_if_no_new_clusters=10):    
 
         """
         Build the hierarchy for the respective alpha threshold
@@ -69,28 +70,55 @@ class TreeSigMA:
 
         #run SigMA with pvalues
         labels, pvalues = self.clusterer.run_sigma(alpha=-np.infty,knn=self.knn,return_pvalues= True) 
+        pvalues = np.array(pvalues)
+        pvalues = pvalues[(pvalues > 0) & (pvalues < self.alpha_threshold)]  # remove zero pvalues and only pvalues up to alpha threshold
         sorted_pvalues = sorted(pvalues)
 
-        # pvalues up to alpha threshold
-        lower_pvalues = [x for x in sorted_pvalues if x <= self.alpha_threshold]
         #make a list of alpha values that are the centers between all these pvalues
-        alpha_values = [(lower_pvalues[i] + lower_pvalues[i+1]) / 2 for i in range(len(lower_pvalues) - 1)]
+        alpha_values = [(sorted_pvalues[i] + sorted_pvalues[i + 1]) / 2 for i in range(len(sorted_pvalues) - 1)]
         
         # Run merge clustering for each alpha and store results
-        for alpha in alpha_values:
+        n_clusters_previous = -np.inf
+        alpha_step = 0
+        alpha_values_used = []
+        
+        for i, alpha in enumerate(alpha_values):
             merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=self.knn, alpha=alpha)
+            merged_pvalues = [p for p in merged_pvalues if p > 0] # the pvalues cannot be 0
+            n_clusters = np.unique(merged_labels).size
+            increment_by_one = (i==0) or (n_clusters == n_clusters_previous+1)
+            # Check if the number of clusters increased by more than 1
+            if (i>0) and (not increment_by_one):
+                increment_by_one = False
+                # alpha_previous = alpha_values[i - 1]
+                # alpha_next = alpha_values[i + 1]
+                # alpha_iterations = np.linspace(alpha_previous, alpha_next, n_steps_if_no_new_clusters)[1:-1]
+                # print(f'Trying to fix hierarchy: need {n_clusters+1} clusters...')
+                # for alpha_new in alpha_iterations:
+                #     print(f"Trying alpha={alpha_new}")
+                #     merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=self.knn, alpha=alpha_new)
+                #     n_clusters = np.unique(merged_labels).size
+                #     print('Got ', n_clusters, ' clusters')
+                #     if n_clusters == n_clusters_previous+1:
+                #         increment_by_one = True
+                #         continue
 
-            self.tree[alpha] = merged_labels
-            
-            # Store the node indices for each cluster label
-            node_indices = {}
-            for idx, label in enumerate(merged_labels):
-                if label not in node_indices:
-                    node_indices[label] = []
-                node_indices[label].append(idx)     
-            self.node_indices[alpha] = node_indices
-            
-        self.alpha_values = alpha_values
+            if increment_by_one:
+                n_clusters_previous = n_clusters
+                self.tree[alpha_step] = merged_labels
+                # Store the node indices for each cluster label
+                self.node_indices[alpha_step] = {
+                    u_idx: np.where(merged_labels == u_idx)[0] for u_idx in np.unique(merged_labels)
+                }
+                alpha_step += 1
+                alpha_values_used.append(alpha)
+            else:
+                print(f"Number of clusters did not increase by 1 at alpha={alpha_step} and alpha={alpha}.")
+                print('Returning the hierarchy up to this point.')
+                self.alpha_values = np.array(alpha_values_used)
+                return alpha_values
+         
+        self.alpha_values = np.array(alpha_values_used)
         return alpha_values
        
     def next(self):
@@ -160,6 +188,7 @@ class TreeNode:
 
 class TreeStructure:
     """Manages the tree of nodes."""
+    
     def __init__(self):
         """Initialize the tree structure."""
         self.nodes = {}  # Dictionary of node_id -> TreeNode
@@ -255,8 +284,9 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         super().__init__(*args, **kwargs)
         self.hierarchy = TreeStructure()
         self.survivability = {}  # Dictionary to store survivability info
+        self.sig_bg_mtx = None  # Matrix to store signal-to-background labels for all stars
 
-    def build_hierarchy(self):
+    def build_hierarchy(self, verbose=False):
         """
         Build the hierarchical tree structure from the clustering results.
         """
@@ -270,15 +300,14 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             )
     
         unique_id_map = {}  # Map to store unique IDs for each label
-    
-        for alpha_idx, alpha in enumerate(self.alpha_values):
-            labels = self.tree[alpha]
-            node_indices = self.node_indices[alpha]
+
+        for alpha_idx, labels in self.tree.items():
+            node_indices = self.node_indices[alpha_idx]
 
             for label, indices in node_indices.items():
                 # Generate a unique ID for the node
-                unique_id = f"{label}_{alpha}"
-                
+                unique_id = f"{label}_{alpha_idx}"
+
                 # Determine the parent based on JD and alpha levels
                 if alpha_idx == 0:
                     parent_id = virtual_root_id
@@ -287,17 +316,16 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                     # Call `find_parent` with current node details
                     parent_id, jd_value = self.find_parent(
                         label=label,
-                        current_alpha=alpha,
                         current_indices=indices,
                         current_alpha_idx=alpha_idx
                     )
-                    
+
                 # If a parent was found and JD=1, only update the alpha_level list
                 if jd_value == 1:
                     parent_node = self.hierarchy.nodes[parent_id]
                     parent_node.update_alpha_levels(alpha_idx)
                     continue
-                
+
                 # create new node and add to tree
                 self.hierarchy.add_node(
                     node_id=unique_id,
@@ -309,15 +337,16 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                 # Initialize or append to the unique ID map
                 if label not in unique_id_map:
                     unique_id_map[label] = []
-                unique_id_map[label].append((alpha, unique_id))
+                unique_id_map[label].append((alpha_idx, unique_id))
                 
                 # Initialize alpha levels for the new node
                 self.hierarchy.nodes[unique_id].update_alpha_levels(alpha_idx)
 
-                print(f"Adding node {unique_id} (original label {label}) with parent {parent_id}, alpha {alpha}")
-    
-
-    def find_parent(self, label, current_alpha, current_indices, current_alpha_idx):
+                if verbose:
+                    print(f"Adding node {unique_id} (original label {label}) with parent {parent_id}, alpha {alpha}")
+                    
+        
+    def find_parent(self, label, current_indices, current_alpha_idx):
         """
         Find the parent node's unique ID based on Jaccard distance.
     
@@ -416,6 +445,10 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                 l[indices] = node.original_label # Assign the unique ID to the corresponding indices
         return l
 
+    def labels_alpha(self, alpha):
+        alpha_step = np.argmin(np.abs(self.alpha_values - alpha))
+        return self.labels(alpha_step)
+
     def compute_survivability(self):
         """
         Compute survivability for each cluster.
@@ -442,7 +475,7 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             return self.survivability.get(cluster_id, "Cluster not found")
         return self.survivability
 
-    def average_signal_bg_ratio(self, X, max_neighbors, k_neighbors):
+    def estimate_signal_bg_proba(self, k_neighbors):
         """
         Compute average signal-to-background ratio for all stars in the hierarchy.
     
@@ -455,16 +488,19 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             knn_density_data (dict): Dictionary with node IDs as keys and kNN densities as values.
             avg_signal_bg_ratio (ndarray): Array of average signal-to-background ratios for all stars.
         """
-        kd_tree = KDTree(X)
-        
+
+        # Get data and KD-Tree from the SigMA object
+        X = self.clusterer.X
+        kd_tree = self.clusterer.kd_tree
+                
         # Dictionary to save kNN density for each node
         knn_density_data = {}
     
         # Number of stars
         N = len(X)
-        
+
         # Matrix to store signal-to-background labels for all stars across nodes
-        sig_bg_mtx = np.full((N, len(self.hierarchy.nodes)), fill_value=np.nan)
+        self.sig_bg_mtx = np.full((N, len(self.hierarchy.nodes)), fill_value=np.nan)
         
         # Iterate through each node in the hierarchy
         for node_idx, node in enumerate(self.hierarchy.traverse_top_down()):
@@ -475,11 +511,11 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             data_indices = node.data_indices
     
             # Query distances for points in the node's cluster
-            k_dists, _ = kd_tree.query(X[data_indices], k=max_neighbors + 1, workers=-1)
+            k_dists, _ = kd_tree.query(X[data_indices], k=k_neighbors + 1, workers=-1)
             k_dists = np.sort(k_dists[:, 1:], axis=1)  # Exclude self-distance (0) and sort
     
             # Calculate kNN density
-            knn_density = 1 / np.sqrt(np.mean(np.square(k_dists[:, :k_neighbors - 1]), axis=1))
+            knn_density = 1 / np.sqrt(np.mean(np.square(k_dists[:, :k_neighbors]), axis=1))
             
             # Save the kNN density data for the node
             knn_density_data[node.node_id] = knn_density
@@ -487,22 +523,22 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             # Fit Gaussian Mixture Model to separate signal and background
             gm = GaussianMixture(n_components=2, random_state=42)
             gm.fit(knn_density.reshape(-1, 1))
+            gm_labels = gm.predict(knn_density.reshape(-1, 1))
     
             # Extract means and define signal threshold
-            means = gm.means_.flatten()
-            threshold = np.sort(means)[1]  # Signal threshold
-    
+          #  means = gm.means_.flatten()
+          #  threshold = np.sort(means)[1]  # Signal threshold
+
             # Assign signal/background labels
-            signal_bg_labels = (knn_density > threshold).astype(int)  # 0: background, 1: signal
-    
+            signal_bg_labels = (gm_labels==np.argmax(gm.means_.flatten())).astype(int)  # 0: background, 1: signal
+
             # Store signal/background labels in the matrix
-            sig_bg_mtx[data_indices, node_idx] = signal_bg_labels
+            self.sig_bg_mtx[data_indices, node_idx] = signal_bg_labels
             node.sig_bg_array = signal_bg_labels  # Save the signal/background array in the node
-    
+
+    def average_signal_bg_ratio(self):
         # Compute the average signal-to-background ratio for each star
-        avg_signal_bg_ratio = np.nanmean(sig_bg_mtx, axis=1)  # Average across nodes
-    
-        return knn_density_data, avg_signal_bg_ratio, sig_bg_mtx
+        return np.nanmean(self.sig_bg_mtx, axis=1)  # Average across nodes
 
     def prune_tree(self, star_threshold, X, ks_p_threshold=0.05, skew_p_threshold=0.05, min_skew = 0.8):
         """
@@ -624,7 +660,7 @@ class TreeSigMAWithHierarchy(TreeSigMA):
     def condition3(self, node, X, ks_p_threshold, skew_p_threshold, min_skew):
         """
         Determine if a node should be removed based on condition 3:
-        The node and all its siblings have no children, and the likelihood that there is a cluster in the cell is small based on KS test and
+        The node and all its siblings have no children, and the likelihood that there is a cluster in the cell is small based on KS test  and
         skewness test.
 
         Skewness test: H: there is no skewness to 1 side for a node - merge if H can not be rejected 
@@ -651,9 +687,9 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                 continue
 
             # Get densities of parent, sibling, and current node
-            parent_densities = self.get_densities(node, X, parent.data_indices)
-            sibling_densities = self.get_densities(node, X, sibling.data_indices)
-            node_densities = self.get_densities(node, X, node.data_indices)
+            parent_densities = self.get_densities(node, parent.data_indices)
+            sibling_densities = self.get_densities(node, sibling.data_indices)
+            node_densities = self.get_densities(node, node.data_indices)
 
             # Skewness test for node and sibling
             _, node_skew_p_value = skewtest(node_densities, alternative="greater")
@@ -661,13 +697,13 @@ class TreeSigMAWithHierarchy(TreeSigMA):
             node_is_skewed = node_skew_p_value < skew_p_threshold and skew(node_densities) > min_skew #if p-value is small - skewness to 1 side
             sibling_is_skewed = sibling_skew_p_value < skew_p_threshold and skew(sibling_densities) > min_skew
 
-            # 1. Merge condition: Skewness test for current node. If skewed, test if KS-test of parent and current node fails.           
+            # 1. Merge condition: Skewness test for current node. If skewed, test if KS-test of parent and current node fails (they are not similar).           
             one_node_is_noise = False
             if node_is_skewed: 
                 # KS-test between parent and node
                 ks_stat, ks_p_value = ks_2samp(parent_densities, node_densities)
                 ks_test_failed = ks_p_value < ks_p_threshold # if p-value smaller threshold, they are not similar.
-                one_node_is_much_noise = ks_test_failed and not sibling_is_skewed # & skewness test fails -> merge 
+                one_node_is_much_noise = ks_test_failed and not sibling_is_skewed # not similar to parent & sibling is not skewed -> merge 
                 one_node_is_few_noise = not ks_test_failed # node is similar to parent 
                 one_node_is_noise = one_node_is_much_noise or one_node_is_few_noise
                     
@@ -680,21 +716,19 @@ class TreeSigMAWithHierarchy(TreeSigMA):
                 
         return False
 
-    def get_densities(self, node, X, data_indices):
+    def get_densities(self, node, data_indices):
 
         # Build a KDTree for distance queries
-        kd_tree = KDTree(X)
-        
-        max_neighbors = 30
+        X = self.clusterer.X
+        kd_tree = self.clusterer.kd_tree
         k_neighbors = 20
         
         # Query distances for points in the node's cluster
-        k_dists, _ = kd_tree.query(X[data_indices], k=max_neighbors + 1, workers=-1)
+        k_dists, _ = kd_tree.query(X[data_indices], k=k_neighbors + 1, workers=-1)
         k_dists = np.sort(k_dists[:, 1:], axis=1)  # Exclude self-distance (0) and sort
-    
-        # Calculate KNN density
-        knn_density = 1 / np.sqrt(np.mean(np.square(k_dists[:, :k_neighbors - 1]), axis=1))
-    
+        
+        # Calculate kNN density
+        knn_density = 1 / np.sqrt(np.mean(np.square(k_dists[:, :k_neighbors]), axis=1))
         return knn_density
     
             
