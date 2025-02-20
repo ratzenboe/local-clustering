@@ -29,7 +29,7 @@ class TreeSigMA:
         beta: float = 0.99,
         knn_initcluster_graph: int = 35,
         knn : int = 20, 
-        alpha_threshold: float = 0.2, 
+        alpha_threshold: float = 0.1, 
         sigma_kwargs: dict = None,
     ):
        
@@ -59,7 +59,7 @@ class TreeSigMA:
         self.node_indices = {} # keys are cluster labels, values are lists of indices corresponding to the data points in that cluster at given alpha level.        
         self.alpha_values = None  # numpy array alpha values used to build the hierarchy
     
-    def run(self, n_steps_if_no_new_clusters=10):    
+    def run(self, n_steps_if_no_new_clusters=10, alpha_values=None):    
 
         """
         Build the hierarchy for the respective alpha threshold
@@ -70,12 +70,13 @@ class TreeSigMA:
 
         #run SigMA with pvalues
         labels, pvalues = self.clusterer.run_sigma(alpha=-np.infty,knn=self.knn,return_pvalues= True) 
-        pvalues = np.array(pvalues)
+        pvalues = np.array(pvalues, dtype=np.float64)
         pvalues = pvalues[(pvalues > 0) & (pvalues < self.alpha_threshold)]  # remove zero pvalues and only pvalues up to alpha threshold
-        sorted_pvalues = sorted(pvalues)
+        sorted_pvalues = np.sort(pvalues)
 
         #make a list of alpha values that are the centers between all these pvalues
-        alpha_values = [(sorted_pvalues[i] + sorted_pvalues[i + 1]) / 2 for i in range(len(sorted_pvalues) - 1)]
+        if alpha_values is None:
+            alpha_values = [(sorted_pvalues[i] + sorted_pvalues[i + 1]) / 2 for i in range(len(sorted_pvalues) - 1)]
         
         # Run merge clustering for each alpha and store results
         n_clusters_previous = -np.inf
@@ -84,24 +85,24 @@ class TreeSigMA:
         
         for i, alpha in enumerate(alpha_values):
             merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=self.knn, alpha=alpha)
-            merged_pvalues = [p for p in merged_pvalues if p > 0] # the pvalues cannot be 0
+       #     merged_pvalues = [p for p in merged_pvalues if p > 0] # the pvalues cannot be 0
             n_clusters = np.unique(merged_labels).size
             increment_by_one = (i==0) or (n_clusters == n_clusters_previous+1)
             # Check if the number of clusters increased by more than 1
             if (i>0) and (not increment_by_one):
-                increment_by_one = False
-                # alpha_previous = alpha_values[i - 1]
-                # alpha_next = alpha_values[i + 1]
-                # alpha_iterations = np.linspace(alpha_previous, alpha_next, n_steps_if_no_new_clusters)[1:-1]
-                # print(f'Trying to fix hierarchy: need {n_clusters+1} clusters...')
-                # for alpha_new in alpha_iterations:
+                 increment_by_one = False
+                 #alpha_previous = alpha_values[i - 1]
+               #  alpha_next = alpha_values[i + 1]
+               #  alpha_iterations = np.linspace(alpha_previous, alpha_next, n_steps_if_no_new_clusters)[1:-1]
+               #  print(f'Trying to fix hierarchy: need {n_clusters+1} clusters...')
+               #  for alpha_new in alpha_iterations:
                 #     print(f"Trying alpha={alpha_new}")
                 #     merged_labels, merged_pvalues = self.clusterer.merge_clusters(knn=self.knn, alpha=alpha_new)
                 #     n_clusters = np.unique(merged_labels).size
                 #     print('Got ', n_clusters, ' clusters')
-                #     if n_clusters == n_clusters_previous+1:
-                #         increment_by_one = True
-                #         continue
+                  #   if n_clusters == n_clusters_previous+1:
+                  #       increment_by_one = True
+                   #      continue
 
             if increment_by_one:
                 n_clusters_previous = n_clusters
@@ -381,7 +382,7 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         non_zero_count = np.count_nonzero(jacc_matrix)
         if non_zero_count > 1:
             raise ValueError(
-                f"Value Error: {non_zero_count} non-zero entries in Jaccard matrix for label {label} at alpha {current_alpha}."
+                f"Value Error: {non_zero_count} non-zero entries in Jaccard matrix for label {label} at alpha {current_alpha_idx}."
             )
 
         # find best JD-Match 
@@ -593,8 +594,8 @@ class TreeSigMAWithHierarchy(TreeSigMA):
 
         # Traverse the tree from bottom to top
         for node in tree.hierarchy.traverse_bottom_up():
-            # Skip the root node
-            if node.parent is None:
+            # Skip when reached top of the tree
+            if node.parent is None or node.parent.node_id == 'virtual_root':
                 continue
     
             # Skip nodes already removed
@@ -722,7 +723,14 @@ class TreeSigMAWithHierarchy(TreeSigMA):
         X = self.clusterer.X
         kd_tree = self.clusterer.kd_tree
         k_neighbors = 20
+
         
+        # Check if data_indices is empty
+        if len(data_indices) == 0:
+            print("data_indices is empty.")
+            print(node.parent.node_id)
+        
+            
         # Query distances for points in the node's cluster
         k_dists, _ = kd_tree.query(X[data_indices], k=k_neighbors + 1, workers=-1)
         k_dists = np.sort(k_dists[:, 1:], axis=1)  # Exclude self-distance (0) and sort
